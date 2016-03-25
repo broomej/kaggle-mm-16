@@ -1,0 +1,228 @@
+```{r}
+require(data.table)
+require(dplyr)
+
+RegularSeasonCompactResults  <- fread("../input/RegularSeasonCompactResults.csv")
+RegularSeasonDetailedResults <- fread("../input/RegularSeasonDetailedResults.csv")
+SampleSubmission             <- fread("../input/SampleSubmission.csv") 
+Seasons                      <- fread("../input/Seasons.csv") 
+Teams                        <- fread("../input/Teams.csv") 
+TourneyCompactResults        <- fread("../input/TourneyCompactResults.csv")
+TourneyDetailedResults       <- fread("../input/TourneyDetailedResults.csv")
+TourneySeeds                 <- fread("../input/TourneySeeds.csv")
+TourneySlots                 <- fread("../input/TourneySlots.csv")
+```
+
+```{r}
+# Coding Tourney results as binary outcome (1==Team 1 wins)
+TourneyCompactResults$t1w <- as.integer(TourneyCompactResults$Wteam < TourneyCompactResults$Lteam)
+
+# Extracting seed number
+TourneySeeds <- TourneySeeds %>% 
+  mutate(SeedNum = as.integer(gsub("[A-Z+a-z]", "", Seed)))
+
+#### Goal Differential
+RegularSeasonCompactResults$goal.diff <- RegularSeasonCompactResults$Wscore - 
+  RegularSeasonCompactResults$Lscore
+
+RegularSeasonDetailedResults$goal.diff <- RegularSeasonDetailedResults$Wscore -
+  RegularSeasonDetailedResults$Lscore
+
+# Separating out the season and teams from the sample submission file
+require(reshape)
+games.to.predict <- data.table("Id" = SampleSubmission$Id, colsplit(SampleSubmission$Id, 
+                                                        split = "_", 
+                                                        names = c("Season", "team.1", "team.2")))
+detach("package:reshape", unload=TRUE) #reshape doesn't play nice with dplyr
+
+```
+
+
+```{r}
+detresults.w <- RegularSeasonDetailedResults %>%
+  rename(team = Wteam, 
+         score = Wscore, 
+         opponent = Lteam,
+         o.score = Lscore, # "o" is for "opponent"
+         loc = Wloc, 
+         fgm = Wfgm,
+         fga = Wfga,
+         fgm3 = Wfgm3,
+         fga3 = Wfga3,
+         ftm = Wftm,
+         fta = Wfta,
+         or = Wor,
+         dr = Wdr,
+         ast = Wast,
+         to = Wto,
+         stl = Wstl,
+         blk = Wblk,
+         pf = Wpf,
+         o.fgm = Lfgm,
+         o.fga = Lfga,
+         o.fgm3 = Lfgm3,
+         o.fga3 = Lfga3,
+         o.ftm = Lftm,
+         o.fta = Lfta,
+         o.or = Lor,
+         o.dr = Ldr,
+         o.ast = Last,
+         o.to = Lto,
+         o.stl = Lstl,
+         o.blk = Lblk,
+         o.pf = Lpf) %>%
+  ungroup()
+detresults.w$outcome <- 1
+
+
+detresults.l <- RegularSeasonDetailedResults %>%
+  rename(team = Lteam, 
+         score = Lscore, 
+         opponent = Wteam,
+         o.score = Wscore, # "o" is for "opponent"
+         loc = Wloc, #Needs to be changed for losing team
+         fgm = Lfgm,
+         fga = Lfga,
+         fgm3 = Lfgm3,
+         fga3 = Lfga3,
+         ftm = Lftm,
+         fta = Lfta,
+         or = Lor,
+         dr = Ldr,
+         ast = Last,
+         to = Lto,
+         stl = Lstl,
+         blk = Lblk,
+         pf = Lpf,
+         o.fgm = Wfgm,
+         o.fga = Wfga,
+         o.fgm3 = Wfgm3,
+         o.fga3 = Wfga3,
+         o.ftm = Wftm,
+         o.fta = Wfta,
+         o.or = Wor,
+         o.dr = Wdr,
+         o.ast = Wast,
+         o.to = Wto,
+         o.stl = Wstl,
+         o.blk = Wblk,
+         o.pf = Wpf) %>%
+  ungroup()
+
+detresults.l$outcome <- 0
+detresults.l$goal.diff <- -1 * detresults.l$goal.diff
+
+RegularSeasonDetailedResults <- bind_rows(detresults.w, detresults.l)
+
+RegSeasonDetSummary <- RegularSeasonDetailedResults %>% 
+  group_by(Season, team) %>%
+  select(-Daynum, -opponent, -loc, -outcome) %>% # I will want to code in home vs away eventually
+  summarise_each(funs(mean, sd)) %>%
+  ungroup()
+```
+
+
+```{r}
+# table(RegSeasonDetSummary$Season, RegSeasonDetSummary$team)
+
+# x <- as.numeric(RegSeasonDetSummary[1,])
+
+
+start.time <- proc.time()
+win.summary <- data.frame()
+# r <- RegSeasonDetSummary[1, ]
+for(i in 1:nrow(RegSeasonDetSummary)){
+  r <- RegSeasonDetSummary[i, ]
+  s <- r$Season
+  t <- r$team
+  season.results <- filter(RegularSeasonCompactResults, Season == s, Wteam == t)
+  wins <- nrow(season.results)
+  season.results <- filter(RegularSeasonCompactResults, Season == s, Lteam == t)
+  losses <- nrow(season.results)
+  win.pct <- wins / (wins + losses)
+  win.summary <- bind_rows(win.summary, data.table(team = t, Season = s, wins, losses, win.pct))
+}
+proc.time() - start.time
+
+RegSeasonDetSummary <- full_join(RegSeasonDetSummary, win.summary, by = c("Season", "team"))
+## summary(sapply(table(RegSeasonDetSummary$team, RegSeasonDetSummary$Season), max))
+```
+
+```{r}
+TourneyResults.2003p <- filter(TourneyCompactResults, Season > 2002)
+
+start.time <- proc.time()
+full.data <- data.frame()
+# r <- TourneyResults.2003p[15, ]
+for(i in 1:nrow(TourneyResults.2003p)){
+  r <- TourneyResults.2003p[i, ]
+  teams <- c(r$Wteam, r$Lteam)
+  t1 <- min(teams)
+  t2 <- max(teams)
+  
+  t1.summ <- filter(RegSeasonDetSummary, Season == r$Season, team == t1)
+  t1.colnames <- paste(colnames(select(t1.summ, -Season)), "1", sep = ".")
+  colnames(t1.summ) <- c("Season", t1.colnames)
+  
+  t2.summ <- filter(RegSeasonDetSummary, Season == r$Season, team == t2)
+  t2.colnames <- paste(colnames(select(t2.summ, -Season)), "2", sep = ".")
+  colnames(t2.summ) <- c("Season", t2.colnames)
+  
+  match.summary <- bind_cols(t1.summ, select(t2.summ, -Season))
+
+  match.summary$outcome <- r$t1w
+  match.summary$seed.1 <- filter(TourneySeeds, Season==r$Season, Team==t1)$SeedNum
+  match.summary$seed.2 <- filter(TourneySeeds, Season==r$Season, Team==t2)$SeedNum
+  full.data <- bind_rows(full.data, match.summary)
+}
+
+proc.time() - start.time
+```
+
+
+
+```{r}
+
+full.data[1:10, 1:7]
+colnames(full.data)
+
+# sapply(train, function(x){sum(is.na(x))})
+# 
+# incompletes <- train[!complete.cases(train), ]
+# incompletes <- incompletes[, sapply(incompletes, function(x){sum(is.na(x))})]
+```
+
+```{r}
+
+train <- full.data
+n <- 1
+########################
+### x <- as.numeric(games.to.predict[1, ])
+
+start.time <- proc.time()
+
+test <- data.frame()
+# r <- games.to.predict[1,]
+for(i in 1:nrow(games.to.predict)){
+  r <- games.to.predict[i, ]
+  teams <- c(r$team.1, r$team.2)
+  t1 <- min(teams)
+  t2 <- max(teams)
+
+  t1.summ <- filter(RegSeasonDetSummary, Season == r$Season, team == t1)
+  t1.colnames <- paste(colnames(select(t1.summ, -Season)), "1", sep = ".")
+  colnames(t1.summ) <- c("Season", t1.colnames)
+
+  t2.summ <- filter(RegSeasonDetSummary, Season == r$Season, team == t2)
+  t2.colnames <- paste(colnames(select(t2.summ, -Season)), "2", sep = ".")
+  colnames(t2.summ) <- c("Season", t2.colnames)
+
+  match.summary <- cbind(t1.summ, select(t2.summ, -Season))
+
+  match.summary$outcome <- NA
+  match.summary$seed.1 <- filter(TourneySeeds, Season==r$Season, Team==t1)$SeedNum
+  match.summary$seed.2 <- filter(TourneySeeds, Season==r$Season, Team==t2)$SeedNum
+  test <- rbind(test, match.summary)
+}
+proc.time() - start.time
+```
